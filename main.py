@@ -3,24 +3,34 @@ import datetime
 import requests
 import base64
 import os
+import logging
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Float
+from sqlalchemy import create_engine, Column, String, Integer, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import google.generativeai as genai
 
+# --- LOGGING SETUP ---
+# This ensures all errors show up clearly in the Render "Logs" tab
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("marvel-network")
+
 # --- CONFIGURATION ---
-# It is highly recommended to use environment variables on Render
+# Using os.getenv with hardcoded fallbacks for development convenience
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAM2yk41iAKpl_Bj09-LJWssz44BIkpREo")
 MPESA_CONSUMER_KEY = os.getenv("MPESA_CONSUMER_KEY", "YLg0zahVAwQFkHuab5atcNySEEt328D2YOB6VNYh8wjWz9uu")
 MPESA_CONSUMER_SECRET = os.getenv("MPESA_CONSUMER_SECRET", "wXGnKVWBDKL5DKmTfsWNPxp4JtWGSdO8inVDDAJRTORvYgrcA1Hkae5AOJN11DMK")
-MPESA_SHORTCODE = "174379"  # Sandbox Shortcode
+MPESA_SHORTCODE = "174379"  # Daraja Sandbox Shortcode
 MPESA_PASSKEY = "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919"
 CALLBACK_URL = "https://marvel-network.onrender.com/api/callback"
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Initialize AI
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e:
+    logger.error(f"AI_INIT_FAILED: {str(e)}")
 
 # --- DATABASE SETUP ---
 DATABASE_URL = "sqlite:///./marvel_network.db"
@@ -39,8 +49,9 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Marvel Network Backend")
+app = FastAPI(title="Marvel Network Elite Core")
 
+# --- CORS POLICY ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,33 +63,54 @@ app.add_middleware(
 # --- UTILS ---
 def get_db():
     db = SessionLocal()
-    try: yield db
-    finally: db.close()
+    try:
+        yield db
+    finally:
+        db.close()
 
 def get_mpesa_token():
     auth_url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-    res = requests.get(auth_url, auth=(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET))
-    res.raise_for_status()
-    return res.json()['access_token']
+    try:
+        res = requests.get(auth_url, auth=(MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET), timeout=10)
+        res.raise_for_status()
+        return res.json()['access_token']
+    except Exception as e:
+        logger.error(f"MPESA_AUTH_ERROR: {str(e)}")
+        raise Exception("Failed to authenticate with M-Pesa gateway.")
 
 # --- API ENDPOINTS ---
 
+@app.get("/")
+async def health_check():
+    """
+    Endpoint for cron-job.org to ping. 
+    Prevents Render from sleeping and confirms system health.
+    """
+    return {
+        "status": "online",
+        "timestamp": time.time(),
+        "node": "Marvel-Network-Alpha",
+        "message": "Tactical HUD Systems Operational"
+    }
+
 @app.post("/api/stk-push")
 async def stk_push(data: dict, db: Session = Depends(get_db)):
-    phone = data.get('phone')
-    amount = data.get('amount')
-    hours = data.get('hours', 1)
-    
-    if not phone or not amount:
-        raise HTTPException(status_code=400, detail="Missing phone or amount")
-
-    # Format phone: 07... or 01... to 254...
-    if phone.startswith('0'):
-        phone = '254' + phone[1:]
-    elif phone.startswith('+'):
-        phone = phone[1:]
-    
     try:
+        logger.info(f"PAYMENT_REQUEST_RECEIVED: {data}")
+        
+        phone = str(data.get('phone', '')).strip()
+        amount = str(data.get('amount', '')).replace('Ksh', '').strip()
+        hours = int(data.get('hours', 1))
+        
+        if not phone or not amount:
+            raise HTTPException(status_code=400, detail="INVALID_INPUT: Missing phone or amount.")
+
+        # Canonicalize phone number
+        if phone.startswith('0'):
+            phone = '254' + phone[1:]
+        elif phone.startswith('+'):
+            phone = phone[1:]
+
         token = get_mpesa_token()
         timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
         password = base64.b64encode(f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()).decode()
@@ -88,18 +120,17 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
             "Password": password,
             "Timestamp": timestamp,
             "TransactionType": "CustomerPayBillOnline",
-            "Amount": int(amount),
+            "Amount": int(float(amount)),
             "PartyA": phone,
             "PartyB": MPESA_SHORTCODE,
             "PhoneNumber": phone,
             "CallBackURL": CALLBACK_URL,
             "AccountReference": "MarvelNetwork",
-            "TransactionDesc": f"WiFi {hours}hrs"
+            "TransactionDesc": f"WiFi Access {hours}hrs"
         }
         
-        # CORRECTED URL: Use /stkpush/v1/process for initial push, not /query
         push_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/process"
-        res = requests.post(push_url, json=payload, headers={"Authorization": f"Bearer {token}"})
+        res = requests.post(push_url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         resp_data = res.json()
         
         if resp_data.get("ResponseCode") == "0":
@@ -107,15 +138,18 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
                 mac_address=f"MAC_{phone}", 
                 phone_number=phone,
                 checkout_id=resp_data['CheckoutRequestID'],
-                expiry_timestamp=time.time() + (int(hours) * 3600)
+                expiry_timestamp=time.time() + (hours * 3600)
             )
             db.add(new_session)
             db.commit()
+            logger.info(f"STK_PUSH_SUCCESS: {resp_data['CheckoutRequestID']}")
             return resp_data
         
-        raise HTTPException(status_code=400, detail=resp_data.get("CustomerMessage", "STK Push failed"))
+        logger.warning(f"STK_PUSH_REJECTED: {resp_data}")
+        raise HTTPException(status_code=400, detail=resp_data.get("CustomerMessage", "STK Push rejected by provider."))
     
     except Exception as e:
+        logger.error(f"STK_PUSH_CRASH: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/query-payment")
@@ -126,17 +160,21 @@ async def query_payment(id: str, db: Session = Depends(get_db)):
     return {"status": session.status}
 
 @app.get("/api/session-status")
-async def session_status(request: Request, db: Session = Depends(get_db)):
-    # In a real environment, you'd filter by the specific user's MAC or IP
-    # For now, we fetch the latest active session for the demonstration
+async def session_status(db: Session = Depends(get_db)):
+    # Fetch the most recent active session
     session = db.query(UserSession).filter(UserSession.status == "paid").order_by(UserSession.id.desc()).first() 
     
     if session and session.expiry_timestamp > time.time():
-        return {"active": True, "expiryTimestamp": session.expiry_timestamp * 1000}
+        return {
+            "active": True, 
+            "expiryTimestamp": session.expiry_timestamp * 1000,
+            "phone_mask": f"****{session.phone_number[-4:]}"
+        }
     return {"active": False}
 
 @app.post("/api/callback")
 async def mpesa_callback(data: dict, db: Session = Depends(get_db)):
+    logger.info(f"CALLBACK_RECEIVED: {data}")
     try:
         stk_body = data['Body']['stkCallback']
         checkout_id = stk_body['CheckoutRequestID']
@@ -147,7 +185,7 @@ async def mpesa_callback(data: dict, db: Session = Depends(get_db)):
             return {"status": "ignored"}
 
         if result_code == 0:
-            # Check for double payment within last 5 minutes
+            # Check for double payment within 5 mins to prevent accidental double charging
             recent = db.query(UserSession).filter(
                 UserSession.phone_number == session.phone_number,
                 UserSession.status == "paid",
@@ -155,32 +193,40 @@ async def mpesa_callback(data: dict, db: Session = Depends(get_db)):
             ).first()
             
             if recent and (time.time() - recent.expiry_timestamp < 300):
-                # Potential agentic action: flag for reversal
                 session.status = "reversed"
+                logger.info(f"DUPLICATE_PAYMENT_FLAGGED: {checkout_id}")
             else:
                 session.status = "paid"
+                logger.info(f"SESSION_ACTIVATED: {checkout_id}")
         else:
             session.status = "failed"
-            # Asynchronous Gemini Analysis (Non-blocking in a real app, here inline for simplicity)
+            # Agentic Error Analysis via Gemini
             try:
                 error_desc = stk_body.get('ResultDesc', 'Unknown error')
-                model.generate_content(f"M-Pesa error {result_code}: {error_desc}. Provide a short user-friendly explanation.")
+                analysis_prompt = (
+                    f"Explain this M-Pesa error to a user: '{error_desc}'. "
+                    f"ResultCode: {result_code}. Keep it tactical and short."
+                )
+                ai_response = model.generate_content(analysis_prompt)
+                logger.info(f"GEMINI_ERROR_ANALYSIS: {ai_response.text}")
             except: pass
 
         db.commit()
         return {"status": "ok"}
     except Exception as e:
+        logger.error(f"CALLBACK_PROCESSING_ERROR: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/terminate-session")
 async def terminate_session(db: Session = Depends(get_db)):
-    # Simple termination logic for demo
     session = db.query(UserSession).filter(UserSession.status == "paid").order_by(UserSession.id.desc()).first()
     if session:
         session.expiry_timestamp = time.time()
         db.commit()
+        logger.info("SESSION_TERMINATED_BY_USER")
     return {"status": "terminated"}
 
 if __name__ == "__main__":
     import uvicorn
+    # Local development runner
     uvicorn.run(app, host="0.0.0.0", port=8000)

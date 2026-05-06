@@ -15,7 +15,7 @@ MPESA_CONSUMER_KEY = "YLg0zahVAwQFkHuab5atcNySEEt328D2YOB6VNYh8wjWz9uu"
 MPESA_CONSUMER_SECRET = "wXGnKVWBDKL5DKmTfsWNPxp4JtWGSdO8inVDDAJRTORvYgrcA1Hkae5AOJN11DMK"
 MPESA_SHORTCODE = "174379"  # Sandbox Shortcode
 MPESA_PASSKEY = "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919"
-CALLBACK_URL = "https://your-domain.com/api/callback"
+CALLBACK_URL = "https://marvel-network.onrender.com"
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')

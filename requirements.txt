@@ -1,5 +1,7 @@
 fastapi
 uvicorn
-requests
 sqlalchemy
+requests
 google-generativeai
+pydantic
+python-multipart

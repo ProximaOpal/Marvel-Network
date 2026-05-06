@@ -1,5 +1,6 @@
 import time
 import datetime
+from datetime import timezone, timedelta
 import requests
 import base64
 import os
@@ -11,17 +12,15 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import google.generativeai as genai
 
-# --- LOGGING SETUP ---
-# This ensures all errors show up clearly in the Render "Logs" tab
+# --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("marvel-network")
 
 # --- CONFIGURATION ---
-# Using os.getenv with hardcoded fallbacks for development convenience
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAM2yk41iAKpl_Bj09-LJWssz44BIkpREo")
 MPESA_CONSUMER_KEY = os.getenv("MPESA_CONSUMER_KEY", "YLg0zahVAwQFkHuab5atcNySEEt328D2YOB6VNYh8wjWz9uu")
 MPESA_CONSUMER_SECRET = os.getenv("MPESA_CONSUMER_SECRET", "wXGnKVWBDKL5DKmTfsWNPxp4JtWGSdO8inVDDAJRTORvYgrcA1Hkae5AOJN11DMK")
-MPESA_SHORTCODE = "174379"  # Daraja Sandbox Shortcode
+MPESA_SHORTCODE = "174379" 
 MPESA_PASSKEY = "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919"
 CALLBACK_URL = "https://marvel-network.onrender.com/api/callback"
 
@@ -32,7 +31,7 @@ try:
 except Exception as e:
     logger.error(f"AI_INIT_FAILED: {str(e)}")
 
-# --- DATABASE SETUP ---
+# --- DATABASE ---
 DATABASE_URL = "sqlite:///./marvel_network.db"
 Base = declarative_base()
 
@@ -43,7 +42,7 @@ class UserSession(Base):
     phone_number = Column(String)
     expiry_timestamp = Column(Float)
     checkout_id = Column(String, unique=True)
-    status = Column(String, default="pending") # pending, paid, failed, reversed
+    status = Column(String, default="pending") 
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -51,7 +50,6 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Marvel Network Elite Core")
 
-# --- CORS POLICY ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -76,63 +74,70 @@ def get_mpesa_token():
         return res.json()['access_token']
     except Exception as e:
         logger.error(f"MPESA_AUTH_ERROR: {str(e)}")
-        raise Exception("Failed to authenticate with M-Pesa gateway.")
+        raise Exception("M-Pesa Authentication Failed. Check Consumer Keys.")
 
 # --- API ENDPOINTS ---
 
 @app.get("/")
 async def health_check():
-    """
-    Endpoint for cron-job.org to ping. 
-    Prevents Render from sleeping and confirms system health.
-    """
-    return {
-        "status": "online",
-        "timestamp": time.time(),
-        "node": "Marvel-Network-Alpha",
-        "message": "Tactical HUD Systems Operational"
-    }
+    return {"status": "online", "timestamp": time.time(), "node": "Marvel-Alpha"}
 
 @app.post("/api/stk-push")
 async def stk_push(data: dict, db: Session = Depends(get_db)):
     try:
-        logger.info(f"PAYMENT_REQUEST_RECEIVED: {data}")
-        
-        phone = str(data.get('phone', '')).strip()
-        amount = str(data.get('amount', '')).replace('Ksh', '').strip()
+        # 1. Precise Data Extraction & Cleaning
+        raw_phone = str(data.get('phone', '')).strip()
+        raw_amount = str(data.get('amount', '')).replace('Ksh', '').strip()
         hours = int(data.get('hours', 1))
-        
-        if not phone or not amount:
-            raise HTTPException(status_code=400, detail="INVALID_INPUT: Missing phone or amount.")
 
-        # Canonicalize phone number
+        # 2. Strict Phone Canonicalization (254XXXXXXXXX)
+        phone = raw_phone
         if phone.startswith('0'):
             phone = '254' + phone[1:]
         elif phone.startswith('+'):
             phone = phone[1:]
-
-        token = get_mpesa_token()
-        timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        password = base64.b64encode(f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}".encode()).decode()
         
+        if not phone.startswith('254') or len(phone) != 12:
+            raise HTTPException(status_code=400, detail="Invalid Phone: Use 2547XXXXXXXX")
+
+        # 3. Secure Integer Casting for Amount (M-Pesa rejects floats)
+        try:
+            amount_int = int(float(raw_amount))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Amount Format")
+
+        # 4. Sync Timezone with EAT (Safaricom Time)
+        # Render servers are UTC; Kenya is UTC+3
+        eat_now = datetime.datetime.now(timezone.utc) + timedelta(hours=3)
+        timestamp = eat_now.strftime('%Y%m%d%H%M%S')
+        
+        # 5. Generate Password
+        password_str = f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}"
+        password = base64.b64encode(password_str.encode()).decode()
+
+        # 6. Build Payload
+        token = get_mpesa_token()
         payload = {
-            "BusinessShortCode": MPESA_SHORTCODE,
+            "BusinessShortCode": int(MPESA_SHORTCODE),
             "Password": password,
             "Timestamp": timestamp,
             "TransactionType": "CustomerPayBillOnline",
-            "Amount": int(float(amount)),
-            "PartyA": phone,
-            "PartyB": MPESA_SHORTCODE,
-            "PhoneNumber": phone,
+            "Amount": amount_int,
+            "PartyA": int(phone),
+            "PartyB": int(MPESA_SHORTCODE),
+            "PhoneNumber": int(phone),
             "CallBackURL": CALLBACK_URL,
             "AccountReference": "MarvelNetwork",
-            "TransactionDesc": f"WiFi Access {hours}hrs"
+            "TransactionDesc": f"WiFi {hours}H"
         }
+        
+        logger.info(f"PUSH_INITIATED: Phone={phone} Amount={amount_int}")
         
         push_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/process"
         res = requests.post(push_url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         resp_data = res.json()
         
+        # 7. Handle Provider Response
         if resp_data.get("ResponseCode") == "0":
             new_session = UserSession(
                 mac_address=f"MAC_{phone}", 
@@ -142,11 +147,12 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
             )
             db.add(new_session)
             db.commit()
-            logger.info(f"STK_PUSH_SUCCESS: {resp_data['CheckoutRequestID']}")
             return resp_data
         
-        logger.warning(f"STK_PUSH_REJECTED: {resp_data}")
-        raise HTTPException(status_code=400, detail=resp_data.get("CustomerMessage", "STK Push rejected by provider."))
+        # Log the exact rejection reason from Safaricom
+        logger.error(f"PROVIDER_REJECTION: {resp_data}")
+        error_msg = resp_data.get("CustomerMessage", "STK Push rejected by provider.")
+        raise HTTPException(status_code=400, detail=error_msg)
     
     except Exception as e:
         logger.error(f"STK_PUSH_CRASH: {str(e)}")
@@ -155,15 +161,11 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
 @app.get("/api/query-payment")
 async def query_payment(id: str, db: Session = Depends(get_db)):
     session = db.query(UserSession).filter(UserSession.checkout_id == id).first()
-    if not session: 
-        return {"status": "not_found"}
-    return {"status": session.status}
+    return {"status": session.status if session else "not_found"}
 
 @app.get("/api/session-status")
 async def session_status(db: Session = Depends(get_db)):
-    # Fetch the most recent active session
     session = db.query(UserSession).filter(UserSession.status == "paid").order_by(UserSession.id.desc()).first() 
-    
     if session and session.expiry_timestamp > time.time():
         return {
             "active": True, 
@@ -174,48 +176,27 @@ async def session_status(db: Session = Depends(get_db)):
 
 @app.post("/api/callback")
 async def mpesa_callback(data: dict, db: Session = Depends(get_db)):
-    logger.info(f"CALLBACK_RECEIVED: {data}")
+    logger.info(f"CALLBACK_DATA: {data}")
     try:
         stk_body = data['Body']['stkCallback']
         checkout_id = stk_body['CheckoutRequestID']
         result_code = stk_body['ResultCode']
         
         session = db.query(UserSession).filter(UserSession.checkout_id == checkout_id).first()
-        if not session: 
-            return {"status": "ignored"}
+        if not session: return {"status": "ignored"}
 
         if result_code == 0:
-            # Check for double payment within 5 mins to prevent accidental double charging
-            recent = db.query(UserSession).filter(
-                UserSession.phone_number == session.phone_number,
-                UserSession.status == "paid",
-                UserSession.id != session.id
-            ).first()
-            
-            if recent and (time.time() - recent.expiry_timestamp < 300):
-                session.status = "reversed"
-                logger.info(f"DUPLICATE_PAYMENT_FLAGGED: {checkout_id}")
-            else:
-                session.status = "paid"
-                logger.info(f"SESSION_ACTIVATED: {checkout_id}")
+            session.status = "paid"
+            logger.info(f"SUCCESS: {checkout_id} ACTIVATED")
         else:
             session.status = "failed"
-            # Agentic Error Analysis via Gemini
-            try:
-                error_desc = stk_body.get('ResultDesc', 'Unknown error')
-                analysis_prompt = (
-                    f"Explain this M-Pesa error to a user: '{error_desc}'. "
-                    f"ResultCode: {result_code}. Keep it tactical and short."
-                )
-                ai_response = model.generate_content(analysis_prompt)
-                logger.info(f"GEMINI_ERROR_ANALYSIS: {ai_response.text}")
-            except: pass
+            logger.warning(f"FAILED: {checkout_id} CODE {result_code}")
 
         db.commit()
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"CALLBACK_PROCESSING_ERROR: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"CALLBACK_ERROR: {str(e)}")
+        return {"status": "error"}
 
 @app.post("/api/terminate-session")
 async def terminate_session(db: Session = Depends(get_db)):
@@ -223,10 +204,8 @@ async def terminate_session(db: Session = Depends(get_db)):
     if session:
         session.expiry_timestamp = time.time()
         db.commit()
-        logger.info("SESSION_TERMINATED_BY_USER")
     return {"status": "terminated"}
 
 if __name__ == "__main__":
     import uvicorn
-    # Local development runner
     uvicorn.run(app, host="0.0.0.0", port=8000)

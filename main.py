@@ -12,7 +12,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import google.generativeai as genai
 
-# --- LOGGING ---
+# --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("marvel-network")
 
@@ -31,7 +31,7 @@ try:
 except Exception as e:
     logger.error(f"AI_INIT_FAILED: {str(e)}")
 
-# --- DATABASE ---
+# --- DATABASE SETUP ---
 DATABASE_URL = "sqlite:///./marvel_network.db"
 Base = declarative_base()
 
@@ -50,6 +50,7 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Marvel Network Elite Core")
 
+# --- CORS POLICY ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -90,7 +91,7 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         raw_amount = str(data.get('amount', '')).replace('Ksh', '').strip()
         hours = int(data.get('hours', 1))
 
-        # 2. Strict Phone Canonicalization (254XXXXXXXXX)
+        # 2. Strict Phone Canonicalization
         phone = raw_phone
         if phone.startswith('0'):
             phone = '254' + phone[1:]
@@ -100,14 +101,13 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         if not phone.startswith('254') or len(phone) != 12:
             raise HTTPException(status_code=400, detail="Invalid Phone: Use 2547XXXXXXXX")
 
-        # 3. Secure Integer Casting for Amount (M-Pesa rejects floats)
+        # 3. Secure Amount Casting
         try:
             amount_int = int(float(raw_amount))
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid Amount Format")
 
-        # 4. Sync Timezone with EAT (Safaricom Time)
-        # Render servers are UTC; Kenya is UTC+3
+        # 4. Sync Timezone with EAT (Kenya Time)
         eat_now = datetime.datetime.now(timezone.utc) + timedelta(hours=3)
         timestamp = eat_now.strftime('%Y%m%d%H%M%S')
         
@@ -115,17 +115,17 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         password_str = f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}"
         password = base64.b64encode(password_str.encode()).decode()
 
-        # 6. Build Payload
+        # 6. Build Payload (Numeric values as Strings for Sandbox stability)
         token = get_mpesa_token()
         payload = {
-            "BusinessShortCode": int(MPESA_SHORTCODE),
+            "BusinessShortCode": str(MPESA_SHORTCODE),
             "Password": password,
             "Timestamp": timestamp,
             "TransactionType": "CustomerPayBillOnline",
-            "Amount": amount_int,
-            "PartyA": int(phone),
-            "PartyB": int(MPESA_SHORTCODE),
-            "PhoneNumber": int(phone),
+            "Amount": str(amount_int),
+            "PartyA": str(phone),
+            "PartyB": str(MPESA_SHORTCODE),
+            "PhoneNumber": str(phone),
             "CallBackURL": CALLBACK_URL,
             "AccountReference": "MarvelNetwork",
             "TransactionDesc": f"WiFi {hours}H"
@@ -133,7 +133,8 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         
         logger.info(f"PUSH_INITIATED: Phone={phone} Amount={amount_int}")
         
-        push_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/process"
+        # URL normalized with trailing slash to prevent 404/Redirect issues
+        push_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/process/"
         res = requests.post(push_url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         resp_data = res.json()
         
@@ -149,7 +150,6 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
             db.commit()
             return resp_data
         
-        # Log the exact rejection reason from Safaricom
         logger.error(f"PROVIDER_REJECTION: {resp_data}")
         error_msg = resp_data.get("CustomerMessage", "STK Push rejected by provider.")
         raise HTTPException(status_code=400, detail=error_msg)

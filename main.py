@@ -75,7 +75,7 @@ def get_mpesa_token():
         return res.json()['access_token']
     except Exception as e:
         logger.error(f"MPESA_AUTH_ERROR: {str(e)}")
-        raise Exception("M-Pesa Authentication Failed. Check Consumer Keys.")
+        raise Exception("M-Pesa Authentication Failed.")
 
 # --- API ENDPOINTS ---
 
@@ -115,14 +115,14 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         password_str = f"{MPESA_SHORTCODE}{MPESA_PASSKEY}{timestamp}"
         password = base64.b64encode(password_str.encode()).decode()
 
-        # 6. Build Payload (Numeric values as Strings for Sandbox stability)
+        # 6. Build Payload
         token = get_mpesa_token()
         payload = {
             "BusinessShortCode": str(MPESA_SHORTCODE),
             "Password": password,
             "Timestamp": timestamp,
             "TransactionType": "CustomerPayBillOnline",
-            "Amount": amount_int,
+            "Amount": str(amount_int),
             "PartyA": str(phone),
             "PartyB": str(MPESA_SHORTCODE),
             "PhoneNumber": str(phone),
@@ -133,7 +133,7 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         
         logger.info(f"PUSH_INITIATED: Phone={phone} Amount={amount_int}")
         
-        # URL normalized with trailing slash to prevent 404/Redirect issues
+        # Correct URL for M-Pesa Express Sandbox
         push_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
         res = requests.post(push_url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         resp_data = res.json()
@@ -153,12 +153,12 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         logger.error(f"PROVIDER_REJECTION: {resp_data}")
         error_msg = resp_data.get("CustomerMessage", "STK Push rejected by provider.")
         raise HTTPException(status_code=400, detail=error_msg)
-    
-except HTTPException:
-    raise  # Let FastAPI handle it cleanly
-except Exception as e:
-    logger.error(f"STK_PUSH_CRASH: {str(e)}")
-    raise HTTPException(status_code=500, detail=str(e))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"STK_PUSH_CRASH: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/query-payment")
 async def query_payment(id: str, db: Session = Depends(get_db)):

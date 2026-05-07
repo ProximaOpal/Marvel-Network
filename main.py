@@ -122,7 +122,7 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
             "Password": password,
             "Timestamp": timestamp,
             "TransactionType": "CustomerPayBillOnline",
-            "Amount": str(amount_int),
+            "Amount": amount_int,
             "PartyA": str(phone),
             "PartyB": str(MPESA_SHORTCODE),
             "PhoneNumber": str(phone),
@@ -134,7 +134,7 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         logger.info(f"PUSH_INITIATED: Phone={phone} Amount={amount_int}")
         
         # URL normalized with trailing slash to prevent 404/Redirect issues
-        push_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/process/"
+        push_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
         res = requests.post(push_url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         resp_data = res.json()
         
@@ -154,9 +154,11 @@ async def stk_push(data: dict, db: Session = Depends(get_db)):
         error_msg = resp_data.get("CustomerMessage", "STK Push rejected by provider.")
         raise HTTPException(status_code=400, detail=error_msg)
     
-    except Exception as e:
-        logger.error(f"STK_PUSH_CRASH: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+except HTTPException:
+    raise  # Let FastAPI handle it cleanly
+except Exception as e:
+    logger.error(f"STK_PUSH_CRASH: {str(e)}")
+    raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/query-payment")
 async def query_payment(id: str, db: Session = Depends(get_db)):
